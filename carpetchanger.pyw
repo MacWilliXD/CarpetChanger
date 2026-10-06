@@ -4,15 +4,18 @@ Cada juego/aplicación de la barra lateral tiene una carpeta con nombre fijo, la
 que el juego lee (p. ej. "Skyrim Special Edition"). Las demás versiones esperan
 al lado con su propio nombre ("Skyrim Special Edition Base", ...). Activar una
 versión devuelve la actual a su nombre y pone la elegida en el nombre activo.
-Solo se renombran carpetas: nunca se copia ni se borra nada.
+Cambiar de versión solo renombra carpetas: nunca copia ni borra nada. La única
+operación que copia es «Duplicar», que crea una carpeta nueva y no toca la original.
 """
 import contextlib
 import ctypes
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -20,10 +23,14 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 APP = "CarpetChanger"
 REPO_URL = "https://github.com/MacWilliXD/CarpetChanger"
+AUTHOR = "MacWilliXD"
+DUPLICATE_TIP = ("Hace una copia completa de esta versión con otro nombre, p. ej. para probar mods sin tocar "
+                 "la original. Comprueba antes que haya espacio y puedes cancelarla. Si la carpeta es grande "
+                 "puede tardar unos minutos.")
 ADD_GAME_TIP = ("Añade otro juego o programa. Elige la carpeta que usa, la que tiene el nombre original "
                 "(p. ej. …\\steamapps\\common\\Skyrim Special Edition).")
 
@@ -209,6 +216,84 @@ def user_default_env():
         return env
     except Exception:
         return clean_env()
+
+
+# --------------------------------------------------------------------------- #
+#  Duplicar carpetas
+# --------------------------------------------------------------------------- #
+class CopyCancelled(Exception):
+    pass
+
+
+def long_path(p):
+    """Ruta con prefijo \\\\?\\ para no chocar con el límite de 260 caracteres (mods con rutas largas)."""
+    p = os.path.abspath(p)
+    return p if p.startswith("\\\\?\\") else "\\\\?\\" + p
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            text = f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+            return text.replace(".", ",")
+        n /= 1024
+
+
+def folder_size(path):
+    """(bytes, archivos) de una carpeta, recorriéndola entera."""
+    total = files = 0
+    stack = [long_path(path)]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    stack.append(e.path)
+                elif e.is_file(follow_symlinks=False):
+                    total += e.stat(follow_symlinks=False).st_size
+                    files += 1
+            except OSError:
+                pass
+    return total, files
+
+
+def copy_folder(src, dst, state):
+    """Copia src en dst (que no debe existir), informando del progreso en `state`.
+
+    state: dict con "done" (bytes copiados), "files_done", "current" y "cancel" (threading.Event).
+    Si se cancela o falla, borra lo que hubiera copiado: nunca deja una copia a medias.
+    """
+    src, dst = long_path(src), long_path(dst)
+    if os.path.exists(dst):
+        raise CCError(f"Ya existe la carpeta:\n{dst[4:]}")
+    os.mkdir(dst)
+    try:
+        for root, dirs, files in os.walk(src):
+            rel = os.path.relpath(root, src)
+            target = dst if rel == "." else os.path.join(dst, rel)
+            for d in dirs:
+                os.makedirs(os.path.join(target, d), exist_ok=True)
+            for f in files:
+                state["current"] = f if rel == "." else os.path.join(rel, f)
+                s, t = os.path.join(root, f), os.path.join(target, f)
+                with open(s, "rb") as fi, open(t, "wb") as fo:
+                    while True:
+                        if state["cancel"].is_set():
+                            raise CopyCancelled()
+                        chunk = fi.read(8 << 20)
+                        if not chunk:
+                            break
+                        fo.write(chunk)
+                        state["done"] += len(chunk)
+                shutil.copystat(s, t)
+                state["files_done"] += 1
+        shutil.copystat(src, dst)
+    except BaseException:
+        shutil.rmtree(dst, ignore_errors=True)
+        raise
 
 
 def is_admin():
@@ -600,6 +685,181 @@ def tip(widget, text):
     return widget
 
 
+def open_url(url):
+    with clean_environ():
+        os.startfile(url)
+
+
+def link(master, text, command, tooltip=None):
+    """Texto clicable discreto (se ilumina al pasar el ratón)."""
+    lbl = ctk.CTkLabel(master, text=text, font=F(12), text_color=DIM, cursor="hand2")
+    lbl.bind("<Button-1>", lambda e: command(), add="+")
+    lbl.bind("<Enter>", lambda e: lbl.configure(text_color=TEXT), add="+")
+    lbl.bind("<Leave>", lambda e: lbl.configure(text_color=DIM), add="+")
+    if tooltip:
+        tip(lbl, tooltip)
+    return lbl
+
+
+def center_on(win, parent, dy=None):
+    win.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
+    y = parent.winfo_rooty() + (dy if dy is not None else (parent.winfo_height() - win.winfo_reqheight()) // 3)
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+
+def fmt_eta(seconds):
+    if seconds < 60:
+        return "menos de un minuto"
+    if seconds < 3600:
+        return f"unos {round(seconds / 60)} min"
+    return f"unas {seconds / 3600:.1f} h".replace(".", ",")
+
+
+class CopyDialog(ctk.CTkToplevel):
+    """Copia una carpeta en segundo plano con barra de progreso. Bloquea hasta que termina.
+
+    Al cerrarse: `ok` es True si la copia se completó; `error` guarda la excepción si falló.
+    Si se cancela o falla, copy_folder ya ha borrado lo copiado.
+    """
+
+    def __init__(self, parent, src, dst, total, count, label):
+        super().__init__(parent)
+        self.withdraw()
+        self.title("Duplicando…")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.configure(fg_color=BG)
+        self.parent = parent
+        self.ok, self.error, self.finished = False, None, False
+        self.total, self.count = max(total, 1), count
+        self.progress = {"done": 0, "files_done": 0, "current": "", "cancel": threading.Event()}
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=26, pady=22)
+        ctk.CTkLabel(body, text=f"Duplicando «{label}»", font=F(18, "bold"), text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(body, text=f"→  {os.path.basename(dst)}", font=F(12), text_color=DIM).pack(anchor="w")
+        self.bar = ctk.CTkProgressBar(body, width=460, height=12, progress_color=GREEN)
+        self.bar.set(0)
+        self.bar.pack(fill="x", pady=(16, 8))
+        self.lbl_amount = ctk.CTkLabel(body, text="", font=F(13, "bold"), text_color=TEXT)
+        self.lbl_amount.pack(anchor="w")
+        self.lbl_eta = ctk.CTkLabel(body, text="Calculando tiempo restante…", font=F(12), text_color=DIM)
+        self.lbl_eta.pack(anchor="w")
+        self.lbl_file = ctk.CTkLabel(body, text="", font=F(11), text_color=DIM, anchor="w", width=460)
+        self.lbl_file.pack(anchor="w", pady=(6, 0))
+        self.cancel_btn = tip(ctk.CTkButton(body, text="Cancelar", width=110, height=34, font=F(13),
+                                            fg_color="transparent", border_width=1, border_color=BORDER,
+                                            text_color=TEXT, hover_color=HOVER, command=self.cancel),
+                              "Detiene la copia y borra lo copiado hasta ahora. La original no se toca.")
+        self.cancel_btn.pack(anchor="e", pady=(14, 0))
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        center_on(self, parent)
+        self.deiconify()
+        self.after(120, lambda: self.winfo_exists() and self.grab_set())
+        self.after(250, lambda: self.winfo_exists() and set_icon(self))
+        parent._copy_dialog = self
+        self.start = time.perf_counter()
+        threading.Thread(target=self._run, args=(src, dst), daemon=True).start()
+        self._poll()
+        self.wait_window()
+        parent._copy_dialog = None
+
+    def _run(self, src, dst):
+        try:
+            copy_folder(src, dst, self.progress)
+            self.ok = True
+        except CopyCancelled:
+            pass
+        except BaseException as e:  # se muestra al usuario en el hilo de la interfaz
+            self.error = e
+        finally:
+            self.finished = True
+
+    def _poll(self):
+        if not self.winfo_exists():
+            return
+        st = self.progress
+        done = st["done"]
+        self.bar.set(min(done / self.total, 1.0))
+        self.lbl_amount.configure(text=f"{human_size(done)} de {human_size(self.total)}   ·   "
+                                       f"{st['files_done']} de {self.count} archivos")
+        elapsed = time.perf_counter() - self.start
+        if st["cancel"].is_set():
+            self.lbl_eta.configure(text="Cancelando y borrando lo copiado…")
+        elif done and elapsed > 1:
+            self.lbl_eta.configure(text=f"Quedan {fmt_eta((self.total - done) / (done / elapsed))}")
+        cur = st["current"]
+        self.lbl_file.configure(text=("…" + cur[-69:]) if len(cur) > 70 else cur)
+        if self.finished:
+            self.destroy()
+            return
+        self.after(100, self._poll)
+
+    def cancel(self):
+        if self.finished or self.progress["cancel"].is_set():
+            return
+        if messagebox.askyesno(APP, "¿Cancelar la copia?\n\nSe borrará lo copiado hasta ahora. "
+                               "La versión original no se toca.", parent=self):
+            self.progress["cancel"].set()
+            self.cancel_btn.configure(text="Cancelando…", state="disabled")
+
+
+class AboutDialog(ctk.CTkToplevel):
+    """Créditos, versión y enlaces del proyecto."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.withdraw()
+        self.title(f"Acerca de {APP}")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.configure(fg_color=BG)
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=34, pady=26)
+        try:
+            from PIL import Image
+            img = ctk.CTkImage(Image.open(resource("icon.ico")), size=(72, 72))
+            ctk.CTkLabel(body, image=img, text="").pack()
+        except Exception:
+            pass
+        ctk.CTkLabel(body, text=APP, font=F(24, "bold"), text_color=TEXT).pack(pady=(8, 0))
+        ctk.CTkLabel(body, text=f"Versión {__version__}", font=F(12), text_color=DIM).pack()
+        ctk.CTkLabel(body, text="Ten varias versiones de un juego (o programa) y cambia cuál usa con un clic.",
+                     font=F(13), text_color=DIM, wraplength=360, justify="center").pack(pady=(12, 0))
+
+        card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
+        card.pack(fill="x", pady=18)
+        ctk.CTkLabel(card, text="Creado por", font=F(11), text_color=DIM).pack(pady=(12, 0))
+        ctk.CTkLabel(card, text=AUTHOR, font=F(17, "bold"), text_color=TEXT).pack(pady=(0, 12))
+
+        tip(ctk.CTkButton(body, text="Ver el proyecto en GitHub  ↗", height=38, font=F(13, "bold"),
+                          command=lambda: open_url(REPO_URL)),
+            f"Abre {REPO_URL} en el navegador.").pack(fill="x")
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(pady=(8, 0))
+        link(row, "Descargar la última versión ↗", lambda: open_url(REPO_URL + "/releases/latest"),
+             "Página de la última versión publicada, con el .exe listo para descargar.").pack(side="left")
+        ctk.CTkLabel(row, text="·", text_color=DIM).pack(side="left", padx=8)
+        link(row, "Informar de un problema ↗", lambda: open_url(REPO_URL + "/issues"),
+             "Abre la sección de incidencias de GitHub para reportar un fallo o pedir una mejora.").pack(side="left")
+
+        ctk.CTkLabel(body, text="Hecho con Python, CustomTkinter y PyInstaller.", font=F(11),
+                     text_color=DIM).pack(pady=(18, 0))
+        ctk.CTkLabel(body, text=f"© 2026 {AUTHOR}", font=F(11), text_color=DIM).pack()
+        ctk.CTkButton(body, text="Cerrar", width=110, height=34, font=F(13), fg_color="transparent",
+                      border_width=1, border_color=BORDER, text_color=TEXT, hover_color=HOVER,
+                      command=self.destroy).pack(pady=(16, 0))
+
+        center_on(self, parent, dy=60)
+        self.deiconify()
+        self.after(120, lambda: self.winfo_exists() and (self.lift(), self.focus_force()))
+        self.after(250, lambda: self.winfo_exists() and set_icon(self))
+
+
 class HelpDialog(ctk.CTkToplevel):
     """Guía: para qué sirve la app, cómo funciona y qué hace cada cosa."""
 
@@ -619,6 +879,8 @@ class HelpDialog(ctk.CTkToplevel):
                       command=self.destroy).pack(side="right")
         tip(ghost(foot, "Ver en GitHub", self._open_repo, 120, TEXT),
             "Abre la página del proyecto: descargas, novedades y el README completo.").pack(side="left")
+        tip(ghost(foot, "Acerca de", parent.open_about, 100, TEXT),
+            "Créditos, versión y enlaces del proyecto.").pack(side="left")
 
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=(24, 8), pady=(20, 0))
@@ -641,8 +903,9 @@ class HelpDialog(ctk.CTkToplevel):
             "Skyrim Special Edition SkyMP           Skyrim Special Edition       ← en uso\n"
             "Skyrim Special Edition Vanilla         Skyrim Special Edition Vanilla")
         ).pack(anchor="w", padx=16, pady=12)
-        self._p("Solo se renombran carpetas: nunca se copia, mueve ni borra nada, así que el cambio es "
-                "instantáneo aunque el juego ocupe decenas de GB.")
+        self._p("Cambiar de versión solo renombra carpetas: nunca copia, mueve ni borra nada, así que es "
+                "instantáneo aunque el juego ocupe decenas de GB. Lo único que copia es «Duplicar», y nunca "
+                "toca la original.")
 
         self._h("Primeros pasos")
         self._steps([
@@ -660,6 +923,9 @@ class HelpDialog(ctk.CTkToplevel):
             ("Activar", "Pone esa versión en uso. La que estaba en uso vuelve a su nombre y la elegida pasa a "
                         "llamarse como espera el juego. También vale hacer doble clic sobre la tarjeta."),
             ("Abrir", "Abre la carpeta de esa versión en el Explorador."),
+            ("Duplicar", "Hace una copia completa de esa versión con otro nombre, junto a las demás: útil para "
+                         "probar mods sin tocar la original. Antes comprueba que haya espacio, muestra el "
+                         "progreso y, si cancelas, no deja nada a medias. La copia queda guardada."),
             ("Editar", "Cambia el nombre que ves o el nombre de su carpeta cuando está guardada (si está "
                        "guardada, también se renombra en el disco)."),
             ("Quitar", "La saca de la lista. La carpeta no se borra."),
@@ -719,8 +985,7 @@ class HelpDialog(ctk.CTkToplevel):
                      wraplength=600).pack(anchor="w", fill="x")
 
     def _open_repo(self):
-        with clean_environ():
-            os.startfile(REPO_URL)
+        open_url(REPO_URL)
 
 
 # --------------------------------------------------------------------------- #
@@ -738,6 +1003,7 @@ class GameView(ctk.CTkFrame):
         self.row_cards = {}
         self.activate_btns = {}
         self.recent = None  # (activada, guardada) tras un cambio, para señalarlas unos segundos
+        self.fresh = None   # nombre de la copia recién duplicada, para señalarla unos segundos
         self._chips = []
 
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -815,6 +1081,8 @@ class GameView(ctk.CTkFrame):
             right.pack(side="right", padx=18)
             ghost(right, "Abrir carpeta", lambda: self.open_path(g.active_path), 110, TEXT,
                   "Abre en el Explorador la carpeta de la versión en uso.").pack(pady=2)
+            ghost(right, "Duplicar", lambda: self.duplicate_variant(cur), 110, TEXT, DUPLICATE_TIP
+                  + "\n\nSi vas a duplicar la versión en uso, cierra antes el juego.").pack(pady=2)
             ghost(right, "Editar", lambda: self.edit_variant(cur), 110, TEXT,
                   "Cambia el nombre de esta versión o cómo se llamará su carpeta cuando la guardes.").pack(pady=2)
             if warn == "ambiguous":
@@ -872,6 +1140,9 @@ class GameView(ctk.CTkFrame):
                     f"fuera de la app. Corrige el nombre con «Editar» o sácala de la lista con «Quitar».")
             tip(ctk.CTkLabel(line, text=v["name"], font=F(16, "bold"), text_color=TEXT if ok else RED),
                 info).pack(side="left")
+            if self.fresh == v["name"]:
+                self._chip(line, "＋  copia nueva",
+                           "Copia recién creada. Está guardada: actívala cuando quieras.")
             if self.recent and self.recent[1] == v["name"]:
                 self._chip(line, "↓  antes en uso",
                            f"Estaba en uso hasta el último cambio. Su carpeta ha vuelto a llamarse «{v['folder']}».")
@@ -885,6 +1156,8 @@ class GameView(ctk.CTkFrame):
             ghost(right, "Editar", lambda v=v: self.edit_variant(v), 64, None,
                   "Cambia el nombre de esta versión o el de su carpeta (también se renombra en el disco)."
                   ).pack(side="right")
+            ghost(right, "Duplicar", lambda v=v: self.duplicate_variant(v), 72, None,
+                  DUPLICATE_TIP).pack(side="right")
             ghost(right, "Abrir", lambda v=v: self.open_path(g.path(v)), 64, None,
                   "Abre su carpeta en el Explorador.").pack(side="right")
             if ok:
@@ -997,14 +1270,15 @@ class GameView(ctk.CTkFrame):
                               fill=pick(DIM if exists else RED), font=font(round(12 * s)))
             if big:
                 cx = x2 - 73 * s
-                for frac, label in ((0.35, "Abrir carpeta"), (0.63, "Editar")):
+                for frac, label in ((0.25, "Abrir carpeta"), (0.5, "Duplicar"), (0.75, "Editar")):
                     stage.create_text(cx, y1 + h * frac, text=label, fill=pick(TEXT), font=font(round(12 * s)))
             else:
-                base, cy = x2 - 12 * s, (y1 + y2) / 2
-                for i, (label, color) in enumerate((("Quitar", RED), ("Editar", DIM), ("Abrir", DIM))):
-                    stage.create_text(base - (32 + 64 * i) * s, cy, text=label, fill=pick(color),
-                                      font=font(round(12 * s)))
-                right = base - 202 * s
+                edge, cy = x2 - 12 * s, (y1 + y2) / 2
+                for label, w, color in (("Quitar", 64, RED), ("Editar", 64, DIM), ("Duplicar", 72, DIM),
+                                        ("Abrir", 64, DIM)):
+                    stage.create_text(edge - w / 2 * s, cy, text=label, fill=pick(color), font=font(round(12 * s)))
+                    edge -= w * s
+                right = edge - 10 * s
                 round_rect(stage, right - 110 * s, cy - 18 * s, right, cy + 18 * s, 6 * s, outline="",
                            fill=pick(BUTTON if exists else BORDER))
                 stage.create_text(right - 55 * s, cy, text="Activar", fill=pick(BUTTON_TEXT),
@@ -1272,6 +1546,85 @@ class GameView(ctk.CTkFrame):
         v["name"], v["folder"] = r["name"], r["folder"]
         self.refresh(force=True)
 
+    def duplicate_variant(self, v):
+        g = self.game
+        cur, _ = g.state()
+        src = g.active_path if v is cur else g.path(v)
+        if not os.path.isdir(src):
+            messagebox.showerror(APP, f"No se encuentra la carpeta de «{v['name']}»:\n{src}", parent=self.app)
+            return
+        self.app.busy(True)
+        try:
+            size, count = folder_size(src)
+            free = shutil.disk_usage(g.base).free
+        finally:
+            self.app.busy(False)
+
+        name, i = f"{v['name']} (copia)", 2
+        while g.find(name) or os.path.exists(os.path.join(g.base, f"{g.active_name} {name}")):
+            name, i = f"{v['name']} (copia {i})", i + 1
+
+        def validate(r):
+            self._check_name(r["name"])
+            self._check_folder(r["folder"])
+            if os.path.exists(os.path.join(g.base, r["folder"])):
+                raise CCError(f"Ya existe una carpeta «{r['folder']}». Elige otro nombre.")
+            if size + (256 << 20) > free:
+                raise CCError(f"No hay espacio suficiente: la copia ocupa {human_size(size)} y en ese disco "
+                              f"quedan {human_size(free)} libres.")
+
+        hint = (f"Se copiará «{v['name']}» ({human_size(size)}, {count} archivos) a una carpeta nueva junto a "
+                f"las demás. Espacio libre en el disco: {human_size(free)}.\nLa copia queda guardada; "
+                f"actívala cuando quieras.")
+        if v is cur:
+            hint += "\nEs la versión en uso: cierra el juego antes de duplicarla."
+        r = ask_form(self.app, "Duplicar versión",
+                     [("name", "Nombre de la copia:", name, False),
+                      ("folder", "Nombre de su carpeta:", f"{g.active_name} {name}", False)],
+                     validate, hint=hint, ok_text="Duplicar")
+        if not r:
+            return
+
+        dlg = CopyDialog(self.app, src, os.path.join(g.base, r["folder"]), size, count, v["name"])
+        if dlg.error is not None:
+            self.refresh(force=True)
+            messagebox.showerror(APP, "No se pudo completar la copia; se ha borrado lo copiado.\n\n"
+                                 + explain(dlg.error), parent=self.app)
+            return
+        if not dlg.ok:
+            self.app.toast("Copia cancelada: no se ha creado nada.", DIM)
+            return
+        # justo debajo de la original, para que se vea de dónde sale
+        g.variants.insert(g.variants.index(v) + 1, {"name": r["name"], "folder": r["folder"]})
+        self.fresh = r["name"]
+        self.refresh(force=True)
+        self.after(60, lambda: self._scroll_into_view(self.row_cards.get(r["name"])))
+        self.app.toast(f"✓  «{v['name']}» duplicada como «{r['name']}»  ·  {human_size(size)}")
+        chips = list(self._chips)
+        self.after(6000, lambda: self._clear_fresh(chips))
+
+    def _scroll_into_view(self, row):
+        """Desplaza la lista lo justo para que `row` quede visible."""
+        canvas = getattr(self.list, "_parent_canvas", None)
+        if row is None or canvas is None or not row.winfo_exists():
+            return
+        self.update_idletasks()
+        total = max(self.list.winfo_height(), 1)
+        top, bottom = (f * total for f in canvas.yview())
+        y1, y2 = row.winfo_y(), row.winfo_y() + row.winfo_height()
+        if y1 < top:
+            canvas.yview_moveto(y1 / total)
+        elif y2 > bottom:
+            canvas.yview_moveto((y2 - (bottom - top) + 8) / total)
+
+    def _clear_fresh(self, chips):
+        if not self.winfo_exists():
+            return
+        self.fresh = None
+        for c in chips:
+            if c.winfo_exists() and "copia nueva" in c.cget("text"):
+                c.destroy()
+
     def remove_variant(self, v):
         if messagebox.askyesno(APP, f"¿Quitar «{v['name']}» de la lista?\n\n"
                                "La carpeta NO se borra del disco.", parent=self.app):
@@ -1330,9 +1683,16 @@ class App(ctk.CTk):
         ctk.CTkLabel(sb, text="JUEGOS Y APPS", font=F(11, "bold"),
                      text_color=DIM).pack(anchor="w", padx=20, pady=(26, 4))
 
+        foot = ctk.CTkFrame(sb, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=20, pady=(0, 14))
+        link(foot, "ⓘ  Acerca de", self.open_about, f"Créditos ({AUTHOR}), versión y enlaces del proyecto."
+             ).pack(side="left")
+        ctk.CTkLabel(foot, text="·", text_color=DIM).pack(side="left", padx=8)
+        link(foot, "GitHub ↗", lambda: open_url(REPO_URL), f"Abre {REPO_URL} en el navegador.").pack(side="left")
+
         theme = ctk.CTkSegmentedButton(sb, values=["Oscuro", "Claro"], font=F(12), command=self.set_theme)
         theme.set("Claro" if self.data.get("theme") == "light" else "Oscuro")
-        theme.pack(side="bottom", fill="x", padx=16, pady=16)
+        theme.pack(side="bottom", fill="x", padx=16, pady=(12, 12))
         for b in getattr(theme, "_buttons_dict", {}).values():
             tip(b, "Cambia entre tema oscuro y claro. Se recuerda para la próxima vez.")
         tip(ctk.CTkButton(sb, text="＋  Añadir juego", height=40, font=F(13, "bold"), command=self.add_game),
@@ -1354,10 +1714,24 @@ class App(ctk.CTk):
                             "Ayuda: para qué sirve CarpetChanger y cómo se usa (F1).")
         self.help_btn.place(relx=1.0, x=-20, y=24, anchor="ne")
         self.bind("<F1>", lambda e: self.open_help())
-        self._help = None
+        self._help = self._about = self._copy_dialog = None
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.show(0)
         self.bind("<FocusIn>", lambda e: e.widget is self and self.view and self.view.refresh())
+
+    def on_close(self):
+        if self._copy_dialog is not None and self._copy_dialog.winfo_exists():
+            # No cerrar con una copia en marcha: quedaría a medias. Se ofrece cancelarla primero.
+            self._copy_dialog.cancel()
+            return
+        self.destroy()
+
+    def open_about(self):
+        if self._about is not None and self._about.winfo_exists():
+            self._about.lift()
+            return
+        self._about = AboutDialog(self._help if self._help is not None and self._help.winfo_exists() else self)
 
     def open_help(self):
         if self._help is not None and self._help.winfo_exists():
@@ -1578,8 +1952,29 @@ def self_test(report):
         assert tooltip.win is not None and tooltip.win.winfo_exists()
         tooltip.hide()
         assert not errors, "".join(errors[0])
-        app.destroy()
         lines.append("ok  ayuda y tooltips")
+
+        # Duplicar: copia completa con la ventana de progreso, y copia cancelada sin restos
+        src_dir = os.path.join(base, "Juego B")
+        with open(os.path.join(src_dir, "Data", "grande.bsa"), "wb") as f:
+            f.write(os.urandom(3 << 20))
+        dlg = CopyDialog(app, src_dir, os.path.join(base, "Juego B copia"), *folder_size(src_dir), "B")
+        assert dlg.ok and dlg.error is None, dlg.error
+        assert folder_size(os.path.join(base, "Juego B copia")) == folder_size(src_dir)
+        state = {"done": 0, "files_done": 0, "current": "", "cancel": threading.Event()}
+        state["cancel"].set()
+        try:
+            copy_folder(src_dir, os.path.join(base, "Juego B cancelada"), state)
+            raise AssertionError("la copia cancelada no se detuvo")
+        except CopyCancelled:
+            assert not os.path.exists(os.path.join(base, "Juego B cancelada")), "quedan restos de la copia"
+        app.open_about()
+        app.update()
+        assert app._about is not None and app._about.winfo_exists()
+        app._about.destroy()
+        assert not errors, "".join(errors[0])
+        app.destroy()
+        lines.append("ok  duplicar (progreso, cancelación sin restos) y créditos")
         lines.append("RESULTADO: OK")
     except Exception:
         lines.append(traceback.format_exc())

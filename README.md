@@ -50,8 +50,8 @@ Skyrim Special Edition Survival               Skyrim Special Edition Survival
 </div>
 
 > [!NOTE]
-> Solo se **renombran** carpetas: nunca se copia, mueve ni borra nada. Por eso el cambio es instantáneo,
-> aunque la carpeta pese decenas de GB.
+> Cambiar de versión solo **renombra** carpetas: nunca copia, mueve ni borra nada. Por eso es instantáneo,
+> aunque la carpeta pese decenas de GB. Lo único que copia es **Duplicar**, y nunca toca la original.
 
 ## Características
 
@@ -60,9 +60,10 @@ Skyrim Special Edition Survival               Skyrim Special Edition Survival
 | **Varios juegos y apps** | Cada uno en su propia entrada de la barra lateral; añade todos los que quieras. |
 | **Un clic** | Botón **Activar** en cada versión (o doble clic sobre ella). |
 | **Se ve qué cambió** | Las tarjetas se intercambian con una animación, y la nueva y la anterior quedan señaladas unos segundos. |
+| **Duplicar** | Copia cualquier versión con otro nombre (p. ej. para probar mods sin tocar la original), con barra de progreso, comprobación de espacio y cancelación sin restos. |
 | **Detección automática** | Al añadir un juego encuentra solas las carpetas de al lado que empiezan por el mismo nombre. |
 | **Lee el disco** | El estado se calcula a partir de las carpetas reales; si renombras algo a mano, la app lo detecta. |
-| **Seguro** | Si el segundo renombrado falla, deshace el primero. Nunca queda nada a medias. |
+| **Seguro** | Si el segundo renombrado falla, deshace el primero; si una copia falla o se cancela, se borra. Nunca queda nada a medias. |
 | **Desbloqueo inteligente** | Si una carpeta está en uso, averigua qué programa la tiene abierta y lo resuelve o te dice cuál cerrar. |
 | **Portable** | Un único `.exe`, sin instalación. La configuración se guarda a su lado. |
 | **Ayuda integrada** | Botón **?** (o F1) con una guía completa, y tooltips en cada botón y nombre. |
@@ -86,6 +87,14 @@ Skyrim Special Edition Survival               Skyrim Special Edition Survival
   <tr>
     <td align="center"><sub>Si la carpeta en uso aún no tiene nombre, la app te avisa…</sub></td>
     <td align="center"><sub>…y te pide uno para poder guardarla al cambiar.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/img/duplicar-form.png" alt="Duplicar una versión"></td>
+    <td width="50%"><img src="docs/img/duplicar-progreso.png" alt="Progreso de la copia"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Duplicar</b>: elige el nombre de la copia; la app comprueba antes que haya espacio…</sub></td>
+    <td align="center"><sub>…y muestra el progreso. Si cancelas, no queda nada a medias.</sub></td>
   </tr>
 </table>
 
@@ -148,6 +157,9 @@ Más cosas que puedes hacer:
 - **＋ Añadir versión**: añade otra carpeta que esté junto a la del juego.
 - **Editar**: cambia el nombre que ves o el nombre de su carpeta (si está guardada, también se renombra en el disco).
 - **Abrir**: abre la carpeta en el Explorador.
+- **Duplicar**: hace una copia completa de esa versión con otro nombre, junto a las demás. Antes comprueba
+  que haya espacio libre, muestra el progreso y el tiempo restante, y si cancelas (o algo falla) borra lo
+  copiado. La copia queda guardada; actívala cuando quieras. Si duplicas la versión en uso, cierra antes el juego.
 - **Quitar**: la saca de la lista. **No borra la carpeta.**
 - **Editar juego / Quitar juego**: lo mismo para el juego entero. Tampoco toca el disco.
 
@@ -267,8 +279,12 @@ CarpetChanger/
 Sí. Sirve para cualquier carpeta que un programa espere encontrar con un nombre fijo.
 
 **¿Puede romper mi instalación?**
-Solo renombra carpetas, y si algo falla a mitad del cambio, lo deshace. Si quitas un juego o una versión de
-la lista, las carpetas se quedan tal cual en el disco.
+Cambiar de versión solo renombra carpetas, y si algo falla a mitad del cambio, lo deshace. Duplicar nunca
+modifica la original. Si quitas un juego o una versión de la lista, las carpetas se quedan tal cual en el disco.
+
+**¿Cuánto ocupa duplicar?**
+Lo mismo que la versión original: es una copia completa. La app te dice el tamaño y el espacio libre antes
+de empezar, y no te deja continuar si no cabe.
 
 **¿Qué pasa con las actualizaciones de Steam?**
 Steam actualiza la carpeta que lleva el nombre del juego, es decir, la versión **en uso**. Si quieres
@@ -279,3 +295,23 @@ A veces pasa con los ejecutables generados con PyInstaller, aunque se han tomado
 (ver [«Windows protegió su PC»](#windows-protegió-su-pc)). Si te ocurre, puedes
 [enviarlo a Microsoft como falso positivo](https://www.microsoft.com/wdsi/filesubmission), añadir una
 excepción o ejecutar directamente `carpetchanger.pyw` con Python.
+
+## Créditos
+
+<table>
+  <tr>
+    <td><img src="docs/img/acerca-de.png" width="260" alt="Ventana Acerca de"></td>
+    <td>
+
+Creado por **[MacWilliXD](https://github.com/MacWilliXD)**.
+
+Hecho con [Python](https://www.python.org/), [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)
+y [PyInstaller](https://pyinstaller.org/).
+
+Dentro de la app, **ⓘ Acerca de** (abajo a la izquierda) muestra los créditos, la versión y enlaces a este
+repositorio, a la última versión y a la página para
+[informar de un problema](https://github.com/MacWilliXD/CarpetChanger/issues).
+
+  </td>
+  </tr>
+</table>

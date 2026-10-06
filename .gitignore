@@ -1,0 +1,15 @@
+# Configuración personal (rutas de cada usuario)
+carpetchanger.json
+carpetchanger.json.tmp
+carpetchanger.json.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Compilación (PyInstaller)
+build/
+dist/
+*.spec

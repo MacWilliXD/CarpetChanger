@@ -1,0 +1,90 @@
+name: Compilar y publicar
+
+# Se ejecuta al subir una etiqueta de versión (p. ej. `git tag v1.0.1 && git push origin v1.0.1`)
+# y crea una Release con CarpetChanger.exe adjunto. También se puede lanzar a mano desde
+# la pestaña Actions: en ese caso solo deja el .exe como artefacto, sin publicar Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Comprobar que la etiqueta coincide con __version__
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path carpetchanger.pyw -Pattern '^__version__ = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") {
+            Write-Error "La etiqueta ${{ github.ref_name }} no coincide con __version__ = $v"
+            exit 1
+          }
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install "customtkinter>=5.2" "pillow>=10"
+
+      # El bootloader precompilado de PyInstaller lo comparten miles de ejecutables (algunos
+      # maliciosos), y los antivirus lo marcan a menudo. Compilarlo aquí da un binario propio.
+      - name: Instalar PyInstaller con bootloader compilado desde el código
+        shell: pwsh
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: |
+          python -m pip install --no-binary pyinstaller --no-cache-dir "pyinstaller>=6"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::warning::No se pudo compilar el bootloader; se usa el precompilado."
+            python -m pip install "pyinstaller>=6"
+          }
+
+      - name: Compilar
+        run: python build.py
+
+      - name: Calcular SHA-256
+        id: hash
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist\CarpetChanger.exe -Algorithm SHA256).Hash
+          "$h  CarpetChanger.exe" | Out-File -Encoding ascii dist\CarpetChanger.exe.sha256
+          "sha256=$h" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CarpetChanger
+          path: |
+            dist/CarpetChanger.exe
+            dist/CarpetChanger.exe.sha256
+
+      - name: Publicar Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: CarpetChanger ${{ github.ref_name }}
+          files: |
+            dist/CarpetChanger.exe
+            dist/CarpetChanger.exe.sha256
+          body: |
+            ## Descarga
+
+            **[⬇️ CarpetChanger.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/CarpetChanger.exe)**: portable, no necesita instalación. Ponlo en cualquier carpeta y ábrelo.
+
+            > La primera vez, Windows SmartScreen puede mostrar «Windows protegió su PC», porque el ejecutable es nuevo y no está firmado con un certificado comercial. Pulsa **Más información → Ejecutar de todas formas**.
+
+            Compilado automáticamente por GitHub Actions a partir del código de esta versión.
+
+            **SHA-256:** `${{ steps.hash.outputs.sha256 }}`
+
+            Para comprobarlo en PowerShell: `Get-FileHash .\CarpetChanger.exe`

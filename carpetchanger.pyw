@@ -6,6 +6,7 @@ al lado con su propio nombre ("Skyrim Special Edition Base", ...). Activar una
 versión devuelve la actual a su nombre y pone la elegida en el nombre activo.
 Solo se renombran carpetas: nunca se copia ni se borra nada.
 """
+import contextlib
 import ctypes
 import json
 import os
@@ -17,7 +18,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 APP = "CarpetChanger"
 
@@ -115,6 +116,64 @@ def explain(e):
                 "un editor (Creation Kit, xEdit, VS Code...), una consola o una ventana del "
                 "Explorador dentro de esa carpeta.\n\nDetalle: " + str(e))
     return str(e)
+
+
+# Variables que PyInstaller pone en el entorno del .exe. Si las hereda otro programa que lancemos,
+# apuntan a nuestra carpeta temporal (que se borra al cerrar). Con el Explorador es grave: todo lo
+# que se abra después desde él las hereda, y CarpetChanger.exe falla al arrancar ("Failed to load
+# Python DLL"), igual que cualquier otro programa que use Tcl/Tk.
+_LEAKED_VARS = ("_PYI_", "_MEIPASS", "TCL_LIBRARY", "TK_LIBRARY", "PYINSTALLER_")
+
+
+def clean_env():
+    """Copia del entorno sin las variables internas de PyInstaller, para lanzar otros programas."""
+    return {k: v for k, v in os.environ.items() if not k.upper().startswith(_LEAKED_VARS)}
+
+
+@contextlib.contextmanager
+def clean_environ():
+    """Como clean_env(), para llamadas que heredan el entorno del proceso (os.startfile)."""
+    saved = {k: os.environ.pop(k) for k in list(os.environ) if k.upper().startswith(_LEAKED_VARS)}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+def user_default_env():
+    """Entorno de un inicio de sesión recién hecho (el que recibe el Explorador al arrancar Windows)."""
+    from ctypes import wintypes as W
+    try:
+        advapi = ctypes.WinDLL("advapi32")
+        userenv = ctypes.WinDLL("userenv")
+        k32 = ctypes.WinDLL("kernel32")
+        advapi.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, ctypes.POINTER(W.HANDLE)]
+        userenv.CreateEnvironmentBlock.argtypes = [ctypes.POINTER(ctypes.c_void_p), W.HANDLE, W.BOOL]
+        userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [W.HANDLE]
+        token, block = W.HANDLE(), ctypes.c_void_p()
+        if not advapi.OpenProcessToken(W.HANDLE(-1), 0x0008 | 0x0002, ctypes.byref(token)):
+            raise OSError("OpenProcessToken")
+        try:
+            if not userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
+                raise OSError("CreateEnvironmentBlock")
+            env, addr = {}, block.value
+            while True:
+                s = ctypes.wstring_at(addr)
+                if not s:
+                    break
+                addr += (len(s) + 1) * 2
+                k, sep, v = s.partition("=")
+                if k and sep:
+                    env[k] = v
+            userenv.DestroyEnvironmentBlock(block)
+        finally:
+            k32.CloseHandle(token)
+        if not any(k.upper() == "PATH" for k in env):
+            raise OSError("entorno vacío")
+        return env
+    except Exception:
+        return clean_env()
 
 
 def is_admin():
@@ -225,7 +284,7 @@ def free_from_explorer(paths):
     los identificadores que explorer.exe mantiene abiertos en ellas. Devuelve cuántos soltó."""
     try:
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _CLOSE_WINDOWS_PS],
-                       env=dict(os.environ, CC_PATHS="|".join(paths)), capture_output=True, timeout=15,
+                       env=dict(clean_env(), CC_PATHS="|".join(paths)), capture_output=True, timeout=15,
                        creationflags=subprocess.CREATE_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -569,7 +628,7 @@ class GameView(ctk.CTkFrame):
         self.app.busy(True)
         try:
             if restart_explorer:
-                subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], capture_output=True,
+                subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], capture_output=True, env=clean_env(),
                                creationflags=subprocess.CREATE_NO_WINDOW)
                 time.sleep(1.5)
             else:
@@ -578,7 +637,10 @@ class GameView(ctk.CTkFrame):
                 g.activate(v)
             finally:
                 if restart_explorer:
-                    subprocess.Popen(["explorer.exe"], creationflags=subprocess.CREATE_NO_WINDOW)
+                    # Entorno de sesión limpio: el Explorador es el padre de todo lo que se abra después.
+                    subprocess.Popen([os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")],
+                                     env=user_default_env(), cwd=os.environ.get("SystemRoot", r"C:\Windows"),
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             self.app.busy(False)
             self.refresh(force=True)
@@ -733,7 +795,8 @@ class GameView(ctk.CTkFrame):
 
     def open_path(self, p):
         if os.path.isdir(p):
-            os.startfile(p)
+            with clean_environ():
+                os.startfile(p)
         else:
             messagebox.showerror(APP, f"No existe:\n{p}", parent=self.app)
 
@@ -821,7 +884,8 @@ class App(ctk.CTk):
                             "Verás qué programas tienen algo abierto ahí; ciérralos y vuelve a intentarlo.",
                             parent=self)
         try:
-            os.startfile("resmon.exe")
+            with clean_environ():
+                os.startfile("resmon.exe")
         except OSError as e:
             messagebox.showerror(APP, str(e), parent=self)
 
@@ -965,6 +1029,15 @@ def self_test(report):
             assert find_lockers([os.path.join(base, "Juego A")])[0], "no detecta el bloqueo"
         free_from_explorer([os.path.join(base, "Juego B")])
         lines.append("ok  detección y liberación de bloqueos")
+
+        for env in (clean_env(), user_default_env()):
+            out = subprocess.run(["cmd", "/c", "set"], env=env, capture_output=True, text=True,
+                                 creationflags=subprocess.CREATE_NO_WINDOW).stdout.upper()
+            assert "PATH=" in out, "entorno vacío"
+            assert not any(("\n" + v) in ("\n" + out) for v in _LEAKED_VARS), "se filtran variables internas"
+        with clean_environ():
+            assert not any(k.upper().startswith(_LEAKED_VARS) for k in os.environ)
+        lines.append("ok  programas lanzados con entorno limpio")
 
         assert os.path.isfile(resource("icon.ico")), "falta icon.ico"
         CONFIG = os.path.join(base, "carpetchanger.json")

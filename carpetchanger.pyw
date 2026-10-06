@@ -9,16 +9,18 @@ Solo se renombran carpetas: nunca se copia ni se borra nada.
 import contextlib
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 APP = "CarpetChanger"
 
@@ -36,10 +38,38 @@ WARN_FG = ("#6b4f00", "#f3d27a")
 RED = ("#c0392b", "#ff7b72")
 SELECTED = ("#d4d8de", "#2a2d32")
 HOVER = ("#dde0e5", "#202226")
+CHIP_BG = ("#cdeedb", "#1d4434")
+BUTTON = ("#3b8ed0", "#1f6aa5")  # azul del tema "blue" de CustomTkinter
+BUTTON_TEXT = ("#dce4ee", "#dce4ee")
 
 
 def F(size, weight="normal"):
     return ctk.CTkFont(family="Segoe UI", size=size, weight=weight)
+
+
+def pick(color):
+    """Color (claro, oscuro) → el que toca con el tema actual."""
+    if isinstance(color, (tuple, list)):
+        return color[1] if ctk.get_appearance_mode() == "Dark" else color[0]
+    return color
+
+
+def mix(a, b, t):
+    """Interpola dos colores #rrggbb."""
+    ca = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    cb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(ca, cb))
+
+
+def ease_in_out(t):
+    return 4 * t ** 3 if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
+
+
+def round_rect(canvas, x1, y1, x2, y2, r, **kw):
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    pts = (x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+           x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1)
+    return canvas.create_polygon(pts, smooth=True, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -488,10 +518,18 @@ def ghost(master, text, command, width=70, color=None):
 #  Vista de un juego
 # --------------------------------------------------------------------------- #
 class GameView(ctk.CTkFrame):
+    SWAP_SECONDS = 0.7    # vuelo de las tarjetas al cambiar de versión
+    PULSE_SECONDS = 0.9   # resaltado de las dos tarjetas que cambiaron
+
     def __init__(self, master, app, game):
         super().__init__(master, fg_color="transparent")
         self.app, self.game = app, game
         self.sig = None
+        self.top_card = None
+        self.row_cards = {}
+        self.activate_btns = {}
+        self.recent = None  # (activada, guardada) tras un cambio, para señalarlas unos segundos
+        self._chips = []
 
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x")
@@ -506,9 +544,11 @@ class GameView(ctk.CTkFrame):
 
         sec = ctk.CTkFrame(self, fg_color="transparent")
         sec.pack(fill="x", pady=(22, 6))
-        ctk.CTkLabel(sec, text="Otras versiones", font=F(15, "bold"), text_color=TEXT).pack(side="left")
-        ctk.CTkButton(sec, text="＋  Añadir versión", width=150, height=32, font=F(12, "bold"),
-                      command=self.add_variant).pack(side="right")
+        self.sec_label = ctk.CTkLabel(sec, text="Otras versiones", font=F(15, "bold"), text_color=TEXT)
+        self.sec_label.pack(side="left")
+        self.add_btn = ctk.CTkButton(sec, text="＋  Añadir versión", width=150, height=32, font=F(12, "bold"),
+                                     command=self.add_variant)
+        self.add_btn.pack(side="right")
 
         self.list = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.list.pack(fill="both", expand=True)
@@ -527,6 +567,7 @@ class GameView(ctk.CTkFrame):
         self.sig = sig
         for w in self.top.winfo_children() + self.list.winfo_children():
             w.destroy()
+        self.top_card, self.row_cards, self.activate_btns, self._chips = None, {}, {}, []
         self._draw_current(cur, warn)
         self._draw_list(cur, exists)
         self.app.render_sidebar()
@@ -536,9 +577,14 @@ class GameView(ctk.CTkFrame):
         if cur:
             card = ctk.CTkFrame(self.top, fg_color=ACTIVE_BG, border_color=GREEN, border_width=2, corner_radius=14)
             card.pack(fill="x")
+            self.top_card = card
             left = ctk.CTkFrame(card, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True, padx=22, pady=18)
-            ctk.CTkLabel(left, text="●  EN USO AHORA", font=F(11, "bold"), text_color=GREEN).pack(anchor="w")
+            line = ctk.CTkFrame(left, fg_color="transparent")
+            line.pack(anchor="w")
+            ctk.CTkLabel(line, text="●  EN USO AHORA", font=F(11, "bold"), text_color=GREEN).pack(side="left")
+            if self.recent and self.recent[0] == cur["name"] and self.recent[1]:
+                self._chip(line, f"⇅  sustituye a «{self.recent[1]}»")
             ctk.CTkLabel(left, text=cur["name"], font=F(28, "bold"), text_color=TEXT).pack(anchor="w")
             ctk.CTkLabel(left, text=f"Cuando cambies, se guardará como «{cur['folder']}»", font=F(12),
                          text_color=DIM).pack(anchor="w")
@@ -588,9 +634,14 @@ class GameView(ctk.CTkFrame):
         for v, ok in others:
             row = ctk.CTkFrame(self.list, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
             row.pack(fill="x", pady=4, padx=(0, 4))
+            self.row_cards[v["name"]] = row
             left = ctk.CTkFrame(row, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True, padx=18, pady=12)
-            ctk.CTkLabel(left, text=v["name"], font=F(16, "bold"), text_color=TEXT if ok else RED).pack(anchor="w")
+            line = ctk.CTkFrame(left, fg_color="transparent")
+            line.pack(anchor="w")
+            ctk.CTkLabel(line, text=v["name"], font=F(16, "bold"), text_color=TEXT if ok else RED).pack(side="left")
+            if self.recent and self.recent[1] == v["name"]:
+                self._chip(line, "↓  antes en uso")
             ctk.CTkLabel(left, text=v["folder"] if ok else f"No se encuentra la carpeta «{v['folder']}»",
                          font=F(12), text_color=DIM if ok else RED).pack(anchor="w")
 
@@ -600,14 +651,178 @@ class GameView(ctk.CTkFrame):
             ghost(right, "Editar", lambda v=v: self.edit_variant(v), 64).pack(side="right")
             ghost(right, "Abrir", lambda v=v: self.open_path(g.path(v)), 64).pack(side="right")
             if ok:
-                ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
-                              command=lambda v=v: self.activate(v)).pack(side="right", padx=(0, 10))
+                btn = ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
+                                    command=lambda v=v: self.activate(v))
+                btn.pack(side="right", padx=(0, 10))
+                self.activate_btns[v["name"]] = btn
             else:
                 ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
                               state="disabled", fg_color=BORDER).pack(side="right", padx=(0, 10))
             if ok:
-                for w in (row, left, *left.winfo_children()):
+                for w in (row, left, line, *line.winfo_children(), *left.winfo_children()):
                     w.bind("<Double-1>", lambda e, v=v: self.activate(v))
+
+    def _chip(self, master, text):
+        chip = ctk.CTkLabel(master, text=f"  {text}  ", font=F(11, "bold"), text_color=GREEN,
+                            fg_color=CHIP_BG, corner_radius=8, height=22)
+        chip.pack(side="left", padx=(12, 0))
+        self._chips.append(chip)
+
+    # -- animación del cambio ---------------------------------------------- #
+    def _rect(self, w):
+        x, y = w.winfo_rootx() - self.winfo_rootx(), w.winfo_rooty() - self.winfo_rooty()
+        return x, y, x + w.winfo_width(), y + w.winfo_height()
+
+    def _plan_swap(self, v, cur):
+        """Calcula de dónde a dónde se mueve cada tarjeta. None si no se puede animar."""
+        if cur is None or not self.top_card or not self.top_card.winfo_exists():
+            return None
+        self.update_idletasks()
+        g = self.game
+        old_others = [x for x in g.variants if x is not cur]
+        new_others = [x for x in g.variants if x is not v]
+        cards = [self.row_cards.get(x["name"]) for x in old_others]
+        if any(c is None or not c.winfo_exists() for c in cards):
+            return None
+        slots = [self._rect(c) for c in cards]
+        view = self._rect(getattr(self.list, "_parent_frame", self.list))
+        if any(r[1] < view[1] - 1 or r[3] > view[3] + 1 for r in slots):
+            return None  # alguna tarjeta queda fuera de la vista (lista desplazada)
+        top = self._rect(self.top_card)
+        flights = []
+        for x in g.variants:
+            src = top if x is cur else slots[old_others.index(x)]
+            dst = top if x is v else slots[new_others.index(x)]
+            flights.append((x, src, dst, 1.0 if x is cur else 0.0, 1.0 if x is v else 0.0))
+        # la que sube se dibuja la última, por encima de todas
+        flights.sort(key=lambda f: (f[0] is v, f[0] is cur))
+        return top, view, flights
+
+    def _animate_swap(self, v, cur, done):
+        plan = None
+        try:
+            plan = self._plan_swap(v, cur)
+        except tk.TclError:
+            pass
+        if not plan:
+            self._land(v, cur, done)
+            return
+        top, view, flights = plan
+        s = self._get_widget_scaling()
+        y0 = top[1]
+        stage = tk.Canvas(self, highlightthickness=0, bd=0, bg=pick(BG))
+        stage.place(x=0, y=y0, width=self.winfo_width(), height=view[3] - y0)
+        tk.Misc.tkraise(stage)  # Canvas.lift() sube elementos del lienzo, no el widget
+        header = (self._rect(self.sec_label), self._rect(self.add_btn))
+        fonts = {}
+
+        def font(px, bold=False):
+            key = (px, bold)
+            if key not in fonts:
+                fonts[key] = tkfont.Font(family="Segoe UI", size=-max(px, 1), weight="bold" if bold else "normal")
+            return fonts[key]
+
+        def shift(r):
+            return r[0], r[1] - y0, r[2], r[3] - y0
+
+        def draw_header():
+            lbl, btn = shift(header[0]), shift(header[1])
+            stage.create_text(lbl[0], (lbl[1] + lbl[3]) / 2, text="Otras versiones", anchor="w",
+                              fill=pick(TEXT), font=font(round(15 * s), True))
+            round_rect(stage, *btn, 6 * s, fill=pick(BUTTON), outline="")
+            stage.create_text((btn[0] + btn[2]) / 2, (btn[1] + btn[3]) / 2, text="＋  Añadir versión",
+                              fill=pick(BUTTON_TEXT), font=font(round(12 * s), True))
+
+        def draw_card(x, r, m):
+            """m = 0: tarjeta de la lista · m = 1: tarjeta grande «en uso». Valores intermedios mezclan."""
+            x1, y1, x2, y2 = shift(r)
+            h = y2 - y1
+            # La que sube ya no tiene su carpeta (ahora es la activa), pero existía: no pintarla en rojo.
+            exists = x is v or os.path.isdir(self.game.path(x))
+            round_rect(stage, x1, y1, x2, y2, (12 + 2 * m) * s, width=(1 + m) * s,
+                       fill=mix(pick(CARD), pick(ACTIVE_BG), m), outline=mix(pick(BORDER), pick(GREEN), m))
+            pad = x1 + (18 + 4 * m) * s
+            big = m >= 0.5
+            if big:
+                stage.create_text(pad, y1 + h * 0.25, text="●  EN USO AHORA", anchor="w",
+                                  fill=pick(GREEN), font=font(round(11 * s), True))
+                sub = f"Cuando cambies, se guardará como «{x['folder']}»"
+            else:
+                sub = x["folder"] if exists else f"No se encuentra la carpeta «{x['folder']}»"
+            stage.create_text(pad, y1 + h * (0.34 + 0.18 * m), text=x["name"], anchor="w",
+                              fill=pick(TEXT if exists else RED), font=font(round((16 + 12 * m) * s), True))
+            stage.create_text(pad, y1 + h * (0.68 + 0.08 * m), text=sub, anchor="w",
+                              fill=pick(DIM if exists else RED), font=font(round(12 * s)))
+            if big:
+                cx = x2 - 73 * s
+                for frac, label in ((0.35, "Abrir carpeta"), (0.63, "Editar")):
+                    stage.create_text(cx, y1 + h * frac, text=label, fill=pick(TEXT), font=font(round(12 * s)))
+            else:
+                base, cy = x2 - 12 * s, (y1 + y2) / 2
+                for i, (label, color) in enumerate((("Quitar", RED), ("Editar", DIM), ("Abrir", DIM))):
+                    stage.create_text(base - (32 + 64 * i) * s, cy, text=label, fill=pick(color),
+                                      font=font(round(12 * s)))
+                right = base - 202 * s
+                round_rect(stage, right - 110 * s, cy - 18 * s, right, cy + 18 * s, 6 * s, outline="",
+                           fill=pick(BUTTON if exists else BORDER))
+                stage.create_text(right - 55 * s, cy, text="Activar", fill=pick(BUTTON_TEXT),
+                                  font=font(round(13 * s), True))
+
+        start = time.perf_counter()
+        duration = self.SWAP_SECONDS
+
+        def tick():
+            if not stage.winfo_exists():
+                return
+            t = min((time.perf_counter() - start) / duration, 1.0)
+            e = ease_in_out(t)
+            stage.delete("all")
+            draw_header()
+            for x, src, dst, m0, m1 in flights:
+                r = tuple(a + (b - a) * e for a, b in zip(src, dst))
+                draw_card(x, r, m0 + (m1 - m0) * e)
+            if t < 1:
+                self.after(12, tick)
+            else:
+                self._land(v, cur, done, stage)
+
+        tick()
+
+    def _land(self, v, cur, done, stage=None):
+        """Dibuja el estado nuevo, retira la animación y resalta las dos tarjetas que cambiaron."""
+        self.recent = (v["name"], cur["name"] if cur else None)
+        self.refresh(force=True)
+        self.update_idletasks()
+        if stage is not None:
+            stage.destroy()
+        done()
+        top, row = self.top_card, self.row_cards.get(self.recent[1] or "")
+        start = time.perf_counter()
+
+        def pulse():
+            if not self.winfo_exists():
+                return
+            t = min((time.perf_counter() - start) / self.PULSE_SECONDS, 1.0)
+            k = math.sin(math.pi * t)
+            if top and top.winfo_exists():
+                top.configure(border_width=round(2 + 3 * k))
+            if row and row.winfo_exists():
+                row.configure(border_width=2 if t < 1 else 1,
+                              border_color=mix(pick(GREEN), pick(BORDER), ease_in_out(t)) if t < 1 else BORDER)
+            if t < 1:
+                self.after(16, pulse)
+
+        pulse()
+        chips = list(self._chips)
+        self.after(4500, lambda: self._clear_recent(chips))
+
+    def _clear_recent(self, chips):
+        if not self.winfo_exists():
+            return
+        self.recent = None
+        for c in chips:
+            if c.winfo_exists():
+                c.destroy()
 
     # -- acciones ---------------------------------------------------------- #
     def activate(self, v):
@@ -623,18 +838,46 @@ class GameView(ctk.CTkFrame):
             cur, _ = g.state()
         self._switch(v, cur)
 
+    def _activate_freeing_explorer(self, v):
+        """Renombra soltando antes lo que el Explorador tenga abierto en esas carpetas.
+
+        Camino rápido (~0,3 s): soltar sus identificadores. Si sigue bloqueada, un reintento breve
+        (Defender o el indexador suelen tenerla solo un instante). Si aun así no, se cierran también
+        las ventanas del Explorador en esas carpetas (más lento, usa PowerShell) y último intento.
+        Un intento fallido no deja nada a medias: Game.activate deshace lo que hubiera hecho.
+        """
+        g = self.game
+        paths = [g.active_path, g.path(v)]
+        try:
+            find_lockers(paths, release=("explorer.exe",))
+        except Exception:
+            pass
+        remedies = [lambda: time.sleep(0.15), lambda: free_from_explorer(paths)]
+        while True:
+            try:
+                g.activate(v)
+                return
+            except OSError as e:
+                if not is_lock_error(e) or not remedies:
+                    raise
+                remedies.pop(0)()
+
     def _switch(self, v, cur, restart_explorer=False):
         g = self.game
+        btn = self.activate_btns.get(v["name"])
+        if btn is not None and btn.winfo_exists():
+            btn.configure(text="Cambiando…", state="disabled")
         self.app.busy(True)
         try:
             if restart_explorer:
                 subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], capture_output=True, env=clean_env(),
                                creationflags=subprocess.CREATE_NO_WINDOW)
                 time.sleep(1.5)
-            else:
-                free_from_explorer([g.active_path, g.path(v)])
             try:
-                g.activate(v)
+                if restart_explorer:
+                    g.activate(v)
+                else:
+                    self._activate_freeing_explorer(v)
             finally:
                 if restart_explorer:
                     # Entorno de sesión limpio: el Explorador es el padre de todo lo que se abra después.
@@ -650,8 +893,8 @@ class GameView(ctk.CTkFrame):
                 messagebox.showerror(APP, explain(e), parent=self.app)
             return
         self.app.busy(False)
-        self.refresh(force=True)
-        self.app.toast(f"✓  «{v['name']}» está ahora en uso" + (f"  ·  «{cur['name']}» guardada" if cur else ""))
+        self._animate_swap(v, cur, lambda: self.app.toast(
+            f"✓  «{v['name']}» está ahora en uso" + (f"  ·  «{cur['name']}» guardada" if cur else "")))
 
     def _handle_lock(self, v, cur, err, explorer_tried):
         """Averigua qué programa bloquea la carpeta y ofrece la salida más sencilla."""
@@ -1043,12 +1286,25 @@ def self_test(report):
         CONFIG = os.path.join(base, "carpetchanger.json")
         save_config({"theme": "dark", "games": [g.d]})
         app = App()
+        errors = []
+        app.report_callback_exception = lambda *exc: errors.append(traceback.format_exception(*exc))
         app.update()
         assert app.view is not None and app.view.game.state()[0]["name"] == "Original"
-        app.set_theme("Claro")
-        app.update()
+        lines.append("ok  interfaz (CustomTkinter, Tcl/Tk, icono)")
+
+        for theme, target, previous in (("Oscuro", "B", "Original"), ("Claro", "Original", "B")):
+            app.set_theme(theme)
+            app.update()
+            app.view.activate(app.view.game.find(target))
+            end = time.perf_counter() + 1.5
+            while time.perf_counter() < end:
+                app.update()
+                time.sleep(0.01)
+            assert not errors, "".join(errors[0])
+            assert app.view.game.state()[0]["name"] == target
+            assert app.view.recent == (target, previous), app.view.recent
         app.destroy()
-        lines.append("ok  interfaz (CustomTkinter, Tcl/Tk, icono, temas)")
+        lines.append("ok  animación del cambio (temas oscuro y claro)")
         lines.append("RESULTADO: OK")
     except Exception:
         lines.append(traceback.format_exc())

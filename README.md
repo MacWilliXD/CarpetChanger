@@ -17,7 +17,7 @@
 
 <br><br>
 
-<img src="docs/img/principal-oscuro.png" width="820" alt="Ventana principal de CarpetChanger">
+<img src="docs/img/cambio.png" width="820" alt="Ventana principal de CarpetChanger tras cambiar de versión">
 
 </div>
 
@@ -44,6 +44,11 @@ Skyrim Special Edition SkyMP                  Skyrim Special Edition          �
 Skyrim Special Edition Survival               Skyrim Special Edition Survival
 ```
 
+<div align="center">
+<img src="docs/img/cambio.gif" width="720" alt="Animación: SkyMP sube a «en uso» y Modlist completa baja a la lista">
+<br><sub>Al pulsar <b>Activar</b>, la versión elegida sube a «en uso» y la anterior baja a la lista.</sub>
+</div>
+
 > [!NOTE]
 > Solo se **renombran** carpetas: nunca se copia, mueve ni borra nada. Por eso el cambio es instantáneo,
 > aunque la carpeta pese decenas de GB.
@@ -54,6 +59,7 @@ Skyrim Special Edition Survival               Skyrim Special Edition Survival
 |---|---|
 | **Varios juegos y apps** | Cada uno en su propia entrada de la barra lateral; añade todos los que quieras. |
 | **Un clic** | Botón **Activar** en cada versión (o doble clic sobre ella). |
+| **Se ve qué cambió** | Las tarjetas se intercambian con una animación, y la nueva y la anterior quedan señaladas unos segundos. |
 | **Detección automática** | Al añadir un juego encuentra solas las carpetas de al lado que empiezan por el mismo nombre. |
 | **Lee el disco** | El estado se calcula a partir de las carpetas reales; si renombras algo a mano, la app lo detecta. |
 | **Seguro** | Si el segundo renombrado falla, deshace el primero. Nunca queda nada a medias. |
@@ -65,11 +71,11 @@ Skyrim Special Edition Survival               Skyrim Special Edition Survival
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/img/cambio.png" alt="Después de cambiar de versión"></td>
+    <td width="50%"><img src="docs/img/principal-oscuro.png" alt="Ventana principal"></td>
     <td width="50%"><img src="docs/img/stardew-claro.png" alt="Tema claro"></td>
   </tr>
   <tr>
-    <td align="center"><sub>Tras pulsar <b>Activar</b>: la nueva versión pasa a estar en uso y se confirma abajo.</sub></td>
+    <td align="center"><sub>Tema oscuro: la versión en uso arriba y las demás debajo, cada una con su botón <b>Activar</b>.</sub></td>
     <td align="center"><sub>Tema claro, con otro juego.</sub></td>
   </tr>
   <tr>

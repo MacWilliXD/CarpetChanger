@@ -53,6 +53,19 @@ jobs:
       - name: Compilar
         run: python build.py
 
+      # Ejecuta el .exe sin Python en el PATH: intercambia carpetas de prueba, detecta
+      # bloqueos y abre la interfaz. Si algo falta dentro del .exe, no se publica nada.
+      - name: Autodiagnóstico del .exe (sin Python)
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0"
+          Get-ChildItem Env:PYTHON* -ErrorAction SilentlyContinue | Remove-Item
+          $p = Start-Process dist\CarpetChanger.exe -ArgumentList '--selftest', "`"$PWD\selftest.txt`"" -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Error "El .exe no terminó a tiempo"; exit 1 }
+          Get-Content selftest.txt -Encoding utf8
+          if ($p.ExitCode -ne 0) { Write-Error "El autodiagnóstico falló (código $($p.ExitCode))"; exit 1 }
+
       - name: Calcular SHA-256
         id: hash
         shell: pwsh

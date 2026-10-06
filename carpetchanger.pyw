@@ -930,7 +930,66 @@ class App(ctk.CTk):
             self.after(150, self.view.register_active)
 
 
+def self_test(report):
+    """Comprueba que el ejecutable trae todo lo necesario y funciona, sin tocar nada del usuario.
+
+    Uso:  CarpetChanger.exe --selftest informe.txt   (código de salida 0 = todo bien)
+    Trabaja en una carpeta temporal y con una configuración temporal.
+    """
+    global CONFIG
+    import shutil
+    import tempfile
+    import traceback
+
+    lines = [f"CarpetChanger {__version__}  ·  Python {sys.version.split()[0]}  ·  "
+             f"{'exe' if getattr(sys, 'frozen', False) else 'script'}"]
+    base = tempfile.mkdtemp(prefix="cc_selftest_")
+    try:
+        for f in ("Juego", "Juego A", "Juego B"):
+            os.makedirs(os.path.join(base, f, "Data"))
+            open(os.path.join(base, f, "Data", f + ".txt"), "w").close()
+        g = Game({"name": "Prueba", "base": base, "active_name": "Juego", "variants": [
+            {"name": "Original", "folder": "Juego Original"},
+            {"name": "A", "folder": "Juego A"}, {"name": "B", "folder": "Juego B"}]})
+        assert g.state()[0]["name"] == "Original"
+        g.activate(g.find("A"))
+        assert g.state()[0]["name"] == "A"
+        assert os.path.isfile(os.path.join(base, "Juego", "Data", "Juego A.txt"))
+        assert os.path.isfile(os.path.join(base, "Juego Original", "Data", "Juego.txt"))
+        g.activate(g.find("B"))
+        g.activate(g.find("Original"))
+        assert os.path.isfile(os.path.join(base, "Juego", "Data", "Juego.txt"))
+        lines.append("ok  intercambio de carpetas")
+
+        with open(os.path.join(base, "Juego A", "Data", "Juego A.txt")):
+            assert find_lockers([os.path.join(base, "Juego A")])[0], "no detecta el bloqueo"
+        free_from_explorer([os.path.join(base, "Juego B")])
+        lines.append("ok  detección y liberación de bloqueos")
+
+        assert os.path.isfile(resource("icon.ico")), "falta icon.ico"
+        CONFIG = os.path.join(base, "carpetchanger.json")
+        save_config({"theme": "dark", "games": [g.d]})
+        app = App()
+        app.update()
+        assert app.view is not None and app.view.game.state()[0]["name"] == "Original"
+        app.set_theme("Claro")
+        app.update()
+        app.destroy()
+        lines.append("ok  interfaz (CustomTkinter, Tcl/Tk, icono, temas)")
+        lines.append("RESULTADO: OK")
+    except Exception:
+        lines.append(traceback.format_exc())
+        lines.append("RESULTADO: ERROR")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    with open(report, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return 0 if lines[-1] == "RESULTADO: OK" else 1
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
+        sys.exit(self_test(os.path.abspath(sys.argv[2])))
     # Que la app nunca bloquee por estar "situada" dentro de una de las carpetas que renombra.
     os.chdir(app_dir())
     App().mainloop()

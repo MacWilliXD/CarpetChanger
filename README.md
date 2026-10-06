@@ -13,7 +13,7 @@
 
 ### [⬇️ Descargar CarpetChanger.exe](https://github.com/MacWilliXD/CarpetChanger/releases/latest/download/CarpetChanger.exe)
 
-<sub>Portable · Windows 10/11 · no necesita instalación ni Python</sub>
+<sub>Portable · Windows 10/11 · un solo archivo que ya lo incluye todo: no hay que instalar Python ni nada más</sub>
 
 <br><br>
 
@@ -186,8 +186,21 @@ ejecutable, con los metadatos de versión incluidos.
    git push origin main v1.0.1
    ```
 
-GitHub Actions compila el `.exe` en una máquina Windows limpia y publica la Release con el ejecutable y
-su SHA-256. El enlace de descarga del README apunta siempre a la última versión.
+GitHub Actions compila el `.exe` en una máquina Windows limpia, lo pone a prueba y publica la Release con
+el ejecutable y su SHA-256. El enlace de descarga del README apunta siempre a la última versión.
+
+### Autodiagnóstico
+
+El `.exe` incluye una prueba que se puede lanzar en cualquier PC:
+
+```powershell
+.\CarpetChanger.exe --selftest informe.txt
+```
+
+En una carpeta temporal (sin tocar nada tuyo) intercambia carpetas de prueba, comprueba la detección de
+bloqueos y abre la interfaz. Deja el resultado en `informe.txt` y termina con código 0 si todo va bien.
+GitHub Actions la ejecuta sin Python en el sistema antes de publicar cada versión, para garantizar que el
+`.exe` lleva dentro todo lo que necesita.
 
 ## Configuración
 

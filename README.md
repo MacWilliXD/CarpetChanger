@@ -65,6 +65,7 @@ Skyrim Special Edition Survival               Skyrim Special Edition Survival
 | **Seguro** | Si el segundo renombrado falla, deshace el primero. Nunca queda nada a medias. |
 | **Desbloqueo inteligente** | Si una carpeta está en uso, averigua qué programa la tiene abierta y lo resuelve o te dice cuál cerrar. |
 | **Portable** | Un único `.exe`, sin instalación. La configuración se guarda a su lado. |
+| **Ayuda integrada** | Botón **?** (o F1) con una guía completa, y tooltips en cada botón y nombre. |
 | **Tema claro y oscuro** | Se recuerda entre sesiones. |
 
 ## Capturas
@@ -133,6 +134,14 @@ genérico que suelen marcar los antivirus.
 3. **Ponle nombre a la versión actual.** La carpeta en uso todavía no tiene un nombre "de guardado"; la app
    te lo pide (por defecto, `Original`) para saber cómo llamarla cuando actives otra.
 4. **Pulsa Activar** en la versión que quieras usar. Listo: abre el juego normalmente.
+
+> [!TIP]
+> ¿Dudas? Pulsa el botón **?** de arriba a la derecha (o **F1**) para abrir la guía, o deja el ratón quieto
+> sobre cualquier botón o nombre para ver qué hace.
+
+<div align="center">
+<img src="docs/img/ayuda.png" width="520" alt="Guía de ayuda integrada">
+</div>
 
 Más cosas que puedes hacer:
 

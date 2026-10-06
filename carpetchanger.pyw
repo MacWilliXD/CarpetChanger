@@ -20,9 +20,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 APP = "CarpetChanger"
+REPO_URL = "https://github.com/MacWilliXD/CarpetChanger"
+ADD_GAME_TIP = ("Añade otro juego o programa. Elige la carpeta que usa, la que tiene el nombre original "
+                "(p. ej. …\\steamapps\\common\\Skyrim Special Edition).")
 
 BG = ("#f3f4f6", "#1b1c1f")
 SIDEBAR = ("#e6e8ec", "#131416")
@@ -39,6 +42,8 @@ RED = ("#c0392b", "#ff7b72")
 SELECTED = ("#d4d8de", "#2a2d32")
 HOVER = ("#dde0e5", "#202226")
 CHIP_BG = ("#cdeedb", "#1d4434")
+TIP_BG = ("#1f2937", "#eceef1")  # tooltips en tono invertido para que destaquen
+TIP_FG = ("#f9fafb", "#111827")
 BUTTON = ("#3b8ed0", "#1f6aa5")  # azul del tema "blue" de CustomTkinter
 BUTTON_TEXT = ("#dce4ee", "#dce4ee")
 
@@ -443,8 +448,9 @@ class Form(ctk.CTkToplevel):
             ent = ctk.CTkEntry(row, textvariable=var, width=330 if browse else 440, height=36, font=F(13))
             ent.pack(side="left", fill="x", expand=True)
             if browse:
-                ctk.CTkButton(row, text="Examinar…", width=100, height=36, font=F(13),
-                              command=lambda v=var: self._browse(v)).pack(side="left", padx=(8, 0))
+                tip(ctk.CTkButton(row, text="Examinar…", width=100, height=36, font=F(13),
+                                  command=lambda v=var: self._browse(v)),
+                    "Elige la carpeta con el explorador de archivos.").pack(side="left", padx=(8, 0))
             self.first = self.first or ent
             self.vars[key] = var
 
@@ -509,9 +515,212 @@ def ask_form(parent, title, fields, validate, hint=None, ok_text="Guardar"):
             fields = [(k, l, res[k], b) for k, l, _, b in fields]
 
 
-def ghost(master, text, command, width=70, color=None):
-    return ctk.CTkButton(master, text=text, command=command, width=width, height=32, font=F(12),
-                         fg_color="transparent", hover_color=HOVER, text_color=color or DIM)
+def ghost(master, text, command, width=70, color=None, tooltip=None):
+    b = ctk.CTkButton(master, text=text, command=command, width=width, height=32, font=F(12),
+                      fg_color="transparent", hover_color=HOVER, text_color=color or DIM)
+    if tooltip:
+        tip(b, tooltip)
+    return b
+
+
+class Tooltip:
+    """Globo de ayuda que aparece al dejar el ratón quieto sobre un widget.
+
+    `text` puede ser un texto o una función que lo devuelva (para datos que cambian).
+    """
+    DELAY_MS = 450
+
+    def __init__(self, widget, text):
+        self.widget, self.text = widget, text
+        self.win = self._job = None
+        for seq, fn in (("<Enter>", self._schedule), ("<Leave>", self._leave), ("<ButtonPress>", self.hide)):
+            widget.bind(seq, fn, add="+")
+        tk.Misc.bind(widget, "<Destroy>", self.hide, add="+")
+
+    def _schedule(self, _=None):
+        self._cancel()
+        if self.win is None:
+            self._job = self.widget.after(self.DELAY_MS, self.show)
+
+    def _cancel(self):
+        if self._job:
+            try:
+                self.widget.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+
+    def _leave(self, _=None):
+        # Los widgets de CustomTkinter están hechos de varias piezas: al pasar de una a otra llega un
+        # <Leave> aunque el ratón siga encima. Solo se oculta si de verdad ha salido.
+        try:
+            self.widget.after(40, self._hide_if_outside)
+        except tk.TclError:
+            pass
+
+    def _hide_if_outside(self):
+        try:
+            under = self.widget.winfo_containing(*self.widget.winfo_pointerxy())
+        except (tk.TclError, KeyError):
+            under = None
+        if under is None or not str(under).startswith(str(self.widget)):
+            self.hide()
+
+    def show(self):
+        self._job = None
+        text = self.text() if callable(self.text) else self.text
+        if not text or not self.widget.winfo_exists():
+            return
+        self.win = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.attributes("-topmost", True)
+        tk.Label(tw, text=text, justify="left", wraplength=340, padx=10, pady=7, bg=pick(TIP_BG),
+                 fg=pick(TIP_FG), font=("Segoe UI", 9), bd=0).pack()
+        tw.update_idletasks()
+        x, y = self.widget.winfo_pointerxy()
+        w, h = tw.winfo_reqwidth(), tw.winfo_reqheight()
+        sw, sh = tw.winfo_screenwidth(), tw.winfo_screenheight()
+        x = min(x + 14, sw - w - 4)
+        y = y + 20 if y + 20 + h < sh else y - h - 10
+        tw.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def hide(self, _=None):
+        self._cancel()
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+            self.win = None
+
+
+def tip(widget, text):
+    """Añade un tooltip a un widget y lo devuelve (para encadenar con .pack())."""
+    widget._cc_tooltip = Tooltip(widget, text)
+    return widget
+
+
+class HelpDialog(ctk.CTkToplevel):
+    """Guía: para qué sirve la app, cómo funciona y qué hace cada cosa."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.withdraw()
+        self.title("Cómo funciona CarpetChanger")
+        self.geometry("700x640")
+        self.minsize(560, 420)
+        self.transient(parent)
+        self.configure(fg_color=BG)
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.pack(side="bottom", fill="x", padx=24, pady=(6, 18))
+        ctk.CTkButton(foot, text="Entendido", width=120, height=36, font=F(13, "bold"),
+                      command=self.destroy).pack(side="right")
+        tip(ghost(foot, "Ver en GitHub", self._open_repo, 120, TEXT),
+            "Abre la página del proyecto: descargas, novedades y el README completo.").pack(side="left")
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=(24, 8), pady=(20, 0))
+        self.body = body
+
+        ctk.CTkLabel(body, text="Cómo funciona CarpetChanger", font=F(22, "bold"),
+                     text_color=TEXT).pack(anchor="w")
+        self._p("Ten varias versiones de un mismo juego (o programa) y cambia cuál usa con un clic: "
+                "por ejemplo una con tu lista de mods, otra limpia y otra para multijugador.")
+
+        self._h("La idea")
+        self._p("Muchos juegos solo leen una carpeta con un nombre fijo; Skyrim, por ejemplo, siempre arranca "
+                "desde «Skyrim Special Edition». CarpetChanger hace que la versión que quieres usar ocupe ese "
+                "nombre y que las demás esperen al lado con el suyo propio:")
+        diagram = ctk.CTkFrame(body, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
+        diagram.pack(fill="x", pady=(4, 6), padx=(0, 12))
+        ctk.CTkLabel(diagram, justify="left", anchor="w", text_color=TEXT, font=("Consolas", 12), text=(
+            "Antes                                  Después de activar «SkyMP»\n"
+            "Skyrim Special Edition       ← en uso  Skyrim Special Edition Modlist\n"
+            "Skyrim Special Edition SkyMP           Skyrim Special Edition       ← en uso\n"
+            "Skyrim Special Edition Vanilla         Skyrim Special Edition Vanilla")
+        ).pack(anchor="w", padx=16, pady=12)
+        self._p("Solo se renombran carpetas: nunca se copia, mueve ni borra nada, así que el cambio es "
+                "instantáneo aunque el juego ocupe decenas de GB.")
+
+        self._h("Primeros pasos")
+        self._steps([
+            "Pulsa «＋ Añadir juego» y elige la carpeta que usa el juego, la que tiene el nombre original "
+            "(p. ej. …\\steamapps\\common\\Skyrim Special Edition).",
+            "Si junto a ella hay otras copias que empiezan por el mismo nombre (p. ej. «Skyrim Special "
+            "Edition Vanilla»), la app te propone añadirlas.",
+            "Ponle nombre a la versión que está en uso ahora; así sabrá cómo llamar a su carpeta cuando la "
+            "guardes.",
+            "Pulsa «Activar» en la versión que quieras usar y abre el juego como siempre.",
+        ])
+
+        self._h("Qué hace cada cosa")
+        for name, text in (
+            ("Activar", "Pone esa versión en uso. La que estaba en uso vuelve a su nombre y la elegida pasa a "
+                        "llamarse como espera el juego. También vale hacer doble clic sobre la tarjeta."),
+            ("Abrir", "Abre la carpeta de esa versión en el Explorador."),
+            ("Editar", "Cambia el nombre que ves o el nombre de su carpeta cuando está guardada (si está "
+                       "guardada, también se renombra en el disco)."),
+            ("Quitar", "La saca de la lista. La carpeta no se borra."),
+            ("＋ Añadir versión", "Añade otra copia del juego. Tiene que estar en la misma carpeta que la "
+                                 "versión en uso (p. ej. todas dentro de steamapps\\common)."),
+            ("Editar / Quitar juego", "Lo mismo para el juego entero. Tampoco toca ninguna carpeta."),
+        ):
+            self._item(name, text)
+        self._p("Consejo: deja el ratón quieto sobre cualquier botón o nombre para ver qué hace.")
+
+        self._h("Si algo no va")
+        self._item("«La carpeta está en uso»",
+                   "Windows no deja renombrar una carpeta si un programa tiene algo abierto dentro. La app "
+                   "cierra sola lo que deja el Explorador y, si aun así no puede, te dice qué programa la usa "
+                   "(suele ser el juego, Steam, un gestor de mods como MO2 o Vortex, o un editor).")
+        self._item("«La versión actual no tiene nombre»",
+                   "La carpeta en uso todavía no tiene nombre de guardado. Pulsa «Ponerle nombre…» y elige uno.")
+        self._item("Una versión sale en rojo",
+                   "No se encuentra su carpeta: puede que se haya renombrado o movido fuera de la app. Usa "
+                   "«Editar» para corregir el nombre de su carpeta o «Quitar» para sacarla de la lista.")
+        self._item("Antes de abrir el juego",
+                   "Comprueba arriba qué versión está «en uso»: es la que el juego cargará.")
+
+        self._h("Tus datos")
+        self._p(f"La configuración se guarda en un archivo junto al programa:\n{CONFIG}\n"
+                "La app es portable: puedes moverla a otra carpeta o a un USB (lleva ese archivo con ella).")
+
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_reqwidth()) // 2
+        y = parent.winfo_rooty() + 40
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.deiconify()
+        self.after(120, lambda: self.winfo_exists() and (self.lift(), self.focus_force()))
+        self.after(250, lambda: self.winfo_exists() and set_icon(self))
+
+    def _h(self, text):
+        ctk.CTkLabel(self.body, text=text, font=F(16, "bold"), text_color=TEXT).pack(anchor="w", pady=(18, 4))
+
+    def _p(self, text):
+        ctk.CTkLabel(self.body, text=text, font=F(13), text_color=DIM, justify="left", anchor="w",
+                     wraplength=600).pack(anchor="w", fill="x", pady=2)
+
+    def _steps(self, steps):
+        for n, text in enumerate(steps, 1):
+            row = ctk.CTkFrame(self.body, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
+            row.pack(fill="x", pady=3, padx=(0, 12))
+            ctk.CTkLabel(row, text=str(n), width=32, height=32, corner_radius=16, fg_color=BUTTON,
+                         text_color="white", font=F(13, "bold")).pack(side="left", padx=12, pady=10)
+            ctk.CTkLabel(row, text=text, font=F(13), text_color=TEXT, justify="left", anchor="w",
+                         wraplength=540).pack(side="left", padx=(0, 14), fill="x")
+
+    def _item(self, name, text):
+        row = ctk.CTkFrame(self.body, fg_color="transparent")
+        row.pack(fill="x", pady=3)
+        ctk.CTkLabel(row, text=name, font=F(13, "bold"), text_color=TEXT, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(row, text=text, font=F(13), text_color=DIM, justify="left", anchor="w",
+                     wraplength=600).pack(anchor="w", fill="x")
+
+    def _open_repo(self):
+        with clean_environ():
+            os.startfile(REPO_URL)
 
 
 # --------------------------------------------------------------------------- #
@@ -532,22 +741,29 @@ class GameView(ctk.CTkFrame):
         self._chips = []
 
         head = ctk.CTkFrame(self, fg_color="transparent")
-        head.pack(fill="x")
+        head.pack(fill="x", padx=(0, 46))  # a la derecha queda el «?» de ayuda
         ctk.CTkLabel(head, text=game.name, font=F(26, "bold"), text_color=TEXT).pack(side="left")
-        ghost(head, "Quitar juego", self.remove_game, 100, RED).pack(side="right")
-        ghost(head, "Editar juego", self.edit_game, 100).pack(side="right", padx=4)
-        ctk.CTkLabel(self, text=f"Carpeta que usa el juego:  {game.active_path}", font=F(12),
-                     text_color=DIM, anchor="w").pack(fill="x", pady=(0, 14))
+        ghost(head, "Quitar juego", self.remove_game, 100, RED,
+              "Quita este juego de la lista. No se borra ni se renombra ninguna carpeta.").pack(side="right")
+        ghost(head, "Editar juego", self.edit_game, 100, None,
+              "Cambia el nombre de este juego en la lista o la carpeta que usa.").pack(side="right", padx=4)
+        tip(ctk.CTkLabel(self, text=f"Carpeta que usa el juego:  {game.active_path}", font=F(12),
+                         text_color=DIM, anchor="w"),
+            "Es la carpeta que abre el juego. La versión «en uso» es la que ocupa este nombre; "
+            "las demás esperan al lado con el suyo.").pack(fill="x", pady=(0, 14))
 
         self.top = ctk.CTkFrame(self, fg_color="transparent")
         self.top.pack(fill="x")
 
         sec = ctk.CTkFrame(self, fg_color="transparent")
         sec.pack(fill="x", pady=(22, 6))
-        self.sec_label = ctk.CTkLabel(sec, text="Otras versiones", font=F(15, "bold"), text_color=TEXT)
+        self.sec_label = tip(ctk.CTkLabel(sec, text="Otras versiones", font=F(15, "bold"), text_color=TEXT),
+                             "Versiones guardadas: esperan con su propio nombre hasta que las actives.")
         self.sec_label.pack(side="left")
-        self.add_btn = ctk.CTkButton(sec, text="＋  Añadir versión", width=150, height=32, font=F(12, "bold"),
-                                     command=self.add_variant)
+        self.add_btn = tip(ctk.CTkButton(sec, text="＋  Añadir versión", width=150, height=32,
+                                         font=F(12, "bold"), command=self.add_variant),
+                           f"Añade otra copia del juego. Tiene que estar en la misma carpeta que la versión "
+                           f"en uso:\n{game.base}")
         self.add_btn.pack(side="right")
 
         self.list = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -582,16 +798,25 @@ class GameView(ctk.CTkFrame):
             left.pack(side="left", fill="x", expand=True, padx=22, pady=18)
             line = ctk.CTkFrame(left, fg_color="transparent")
             line.pack(anchor="w")
-            ctk.CTkLabel(line, text="●  EN USO AHORA", font=F(11, "bold"), text_color=GREEN).pack(side="left")
+            in_use = (f"Esta es la versión que cargará el juego al abrirlo. Ahora mismo su carpeta se llama "
+                      f"«{g.active_name}».")
+            tip(ctk.CTkLabel(line, text="●  EN USO AHORA", font=F(11, "bold"), text_color=GREEN),
+                in_use).pack(side="left")
             if self.recent and self.recent[0] == cur["name"] and self.recent[1]:
-                self._chip(line, f"⇅  sustituye a «{self.recent[1]}»")
-            ctk.CTkLabel(left, text=cur["name"], font=F(28, "bold"), text_color=TEXT).pack(anchor="w")
-            ctk.CTkLabel(left, text=f"Cuando cambies, se guardará como «{cur['folder']}»", font=F(12),
-                         text_color=DIM).pack(anchor="w")
+                self._chip(line, f"⇅  sustituye a «{self.recent[1]}»",
+                           f"Acabas de cambiar: «{cur['name']}» ha sustituido a «{self.recent[1]}», "
+                           f"que ha vuelto a su carpeta.")
+            tip(ctk.CTkLabel(left, text=cur["name"], font=F(28, "bold"), text_color=TEXT), in_use).pack(anchor="w")
+            tip(ctk.CTkLabel(left, text=f"Cuando cambies, se guardará como «{cur['folder']}»", font=F(12),
+                             text_color=DIM),
+                f"Al activar otra versión, la carpeta «{g.active_name}» se renombrará a «{cur['folder']}» "
+                f"para guardarla. Puedes cambiar ese nombre con «Editar».").pack(anchor="w")
             right = ctk.CTkFrame(card, fg_color="transparent")
             right.pack(side="right", padx=18)
-            ghost(right, "Abrir carpeta", lambda: self.open_path(g.active_path), 110, TEXT).pack(pady=2)
-            ghost(right, "Editar", lambda: self.edit_variant(cur), 110, TEXT).pack(pady=2)
+            ghost(right, "Abrir carpeta", lambda: self.open_path(g.active_path), 110, TEXT,
+                  "Abre en el Explorador la carpeta de la versión en uso.").pack(pady=2)
+            ghost(right, "Editar", lambda: self.edit_variant(cur), 110, TEXT,
+                  "Cambia el nombre de esta versión o cómo se llamará su carpeta cuando la guardes.").pack(pady=2)
             if warn == "ambiguous":
                 self._warn("Algunas versiones no se encuentran (marcadas en rojo). Puede que se hayan "
                            "renombrado o movido fuera de la app.")
@@ -601,7 +826,9 @@ class GameView(ctk.CTkFrame):
             self._warn(f"La carpeta «{g.active_name}» está en uso pero aún no tiene nombre. Pónselo para "
                        "poder guardarla cuando cambies a otra versión.",
                        title="La versión actual no tiene nombre",
-                       button=("Ponerle nombre…", self.register_active))
+                       button=("Ponerle nombre…", self.register_active,
+                               "Dale un nombre a la versión que está en uso para poder guardarla cuando "
+                               "cambies a otra."))
         elif warn == "missing":
             self._warn("Todas las versiones están guardadas, así que ahora mismo el juego no encontrará "
                        "su carpeta. Activa una de abajo.", title="Ninguna versión en uso")
@@ -620,8 +847,8 @@ class GameView(ctk.CTkFrame):
         ctk.CTkLabel(left, text=text, font=F(12), text_color=WARN_FG, wraplength=520,
                      justify="left").pack(anchor="w")
         if button:
-            ctk.CTkButton(card, text=button[0], command=button[1], width=150, height=36,
-                          font=F(13, "bold")).pack(side="right", padx=18)
+            tip(ctk.CTkButton(card, text=button[0], command=button[1], width=150, height=36,
+                              font=F(13, "bold")), button[2]).pack(side="right", padx=18)
 
     def _draw_list(self, cur, exists):
         g = self.game
@@ -639,32 +866,47 @@ class GameView(ctk.CTkFrame):
             left.pack(side="left", fill="x", expand=True, padx=18, pady=12)
             line = ctk.CTkFrame(left, fg_color="transparent")
             line.pack(anchor="w")
-            ctk.CTkLabel(line, text=v["name"], font=F(16, "bold"), text_color=TEXT if ok else RED).pack(side="left")
+            info = (f"Versión guardada. Su carpeta:\n{g.path(v)}\n\nDoble clic o «Activar» para usarla."
+                    if ok else
+                    f"No se encuentra su carpeta:\n{g.path(v)}\n\nPuede que se haya renombrado o movido "
+                    f"fuera de la app. Corrige el nombre con «Editar» o sácala de la lista con «Quitar».")
+            tip(ctk.CTkLabel(line, text=v["name"], font=F(16, "bold"), text_color=TEXT if ok else RED),
+                info).pack(side="left")
             if self.recent and self.recent[1] == v["name"]:
-                self._chip(line, "↓  antes en uso")
-            ctk.CTkLabel(left, text=v["folder"] if ok else f"No se encuentra la carpeta «{v['folder']}»",
-                         font=F(12), text_color=DIM if ok else RED).pack(anchor="w")
+                self._chip(line, "↓  antes en uso",
+                           f"Estaba en uso hasta el último cambio. Su carpeta ha vuelto a llamarse «{v['folder']}».")
+            tip(ctk.CTkLabel(left, text=v["folder"] if ok else f"No se encuentra la carpeta «{v['folder']}»",
+                             font=F(12), text_color=DIM if ok else RED), info).pack(anchor="w")
 
             right = ctk.CTkFrame(row, fg_color="transparent")
             right.pack(side="right", padx=12)
-            ghost(right, "Quitar", lambda v=v: self.remove_variant(v), 64, RED).pack(side="right")
-            ghost(right, "Editar", lambda v=v: self.edit_variant(v), 64).pack(side="right")
-            ghost(right, "Abrir", lambda v=v: self.open_path(g.path(v)), 64).pack(side="right")
+            ghost(right, "Quitar", lambda v=v: self.remove_variant(v), 64, RED,
+                  "Quita esta versión de la lista. La carpeta NO se borra.").pack(side="right")
+            ghost(right, "Editar", lambda v=v: self.edit_variant(v), 64, None,
+                  "Cambia el nombre de esta versión o el de su carpeta (también se renombra en el disco)."
+                  ).pack(side="right")
+            ghost(right, "Abrir", lambda v=v: self.open_path(g.path(v)), 64, None,
+                  "Abre su carpeta en el Explorador.").pack(side="right")
             if ok:
-                btn = ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
-                                    command=lambda v=v: self.activate(v))
+                btn = tip(ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
+                                        command=lambda v=v: self.activate(v)),
+                          f"Pon «{v['name']}» en uso: la versión actual vuelve a su nombre y esta pasa a "
+                          f"llamarse «{g.active_name}», que es la que abre el juego.")
                 btn.pack(side="right", padx=(0, 10))
                 self.activate_btns[v["name"]] = btn
             else:
-                ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
-                              state="disabled", fg_color=BORDER).pack(side="right", padx=(0, 10))
+                tip(ctk.CTkButton(right, text="Activar", width=110, height=36, font=F(13, "bold"),
+                                  state="disabled", fg_color=BORDER),
+                    "No se puede activar porque no se encuentra su carpeta.").pack(side="right", padx=(0, 10))
             if ok:
                 for w in (row, left, line, *line.winfo_children(), *left.winfo_children()):
                     w.bind("<Double-1>", lambda e, v=v: self.activate(v))
 
-    def _chip(self, master, text):
+    def _chip(self, master, text, tooltip=None):
         chip = ctk.CTkLabel(master, text=f"  {text}  ", font=F(11, "bold"), text_color=GREEN,
                             fg_color=CHIP_BG, corner_radius=8, height=22)
+        if tooltip:
+            tip(chip, tooltip)
         chip.pack(side="left", padx=(12, 0))
         self._chips.append(chip)
 
@@ -1091,8 +1333,10 @@ class App(ctk.CTk):
         theme = ctk.CTkSegmentedButton(sb, values=["Oscuro", "Claro"], font=F(12), command=self.set_theme)
         theme.set("Claro" if self.data.get("theme") == "light" else "Oscuro")
         theme.pack(side="bottom", fill="x", padx=16, pady=16)
-        ctk.CTkButton(sb, text="＋  Añadir juego", height=40, font=F(13, "bold"),
-                      command=self.add_game).pack(side="bottom", fill="x", padx=16)
+        for b in getattr(theme, "_buttons_dict", {}).values():
+            tip(b, "Cambia entre tema oscuro y claro. Se recuerda para la próxima vez.")
+        tip(ctk.CTkButton(sb, text="＋  Añadir juego", height=40, font=F(13, "bold"), command=self.add_game),
+            ADD_GAME_TIP).pack(side="bottom", fill="x", padx=16)
 
         self.game_list = ctk.CTkScrollableFrame(sb, fg_color="transparent")
         self.game_list.pack(fill="both", expand=True, padx=8, pady=(0, 10))
@@ -1102,8 +1346,25 @@ class App(ctk.CTk):
         self.toast_lbl = ctk.CTkLabel(self, text="", font=F(12, "bold"), text_color=GREEN, anchor="w")
         self.toast_lbl.grid(row=1, column=1, sticky="ew", padx=30, pady=(0, 10))
 
+        # «?» arriba a la derecha: guía de uso (también con F1)
+        self.help_btn = tip(ctk.CTkButton(self, text="?", width=34, height=34, corner_radius=17,
+                                          font=F(16, "bold"), fg_color=CARD, hover_color=HOVER,
+                                          text_color=TEXT, border_width=1, border_color=BORDER,
+                                          command=self.open_help),
+                            "Ayuda: para qué sirve CarpetChanger y cómo se usa (F1).")
+        self.help_btn.place(relx=1.0, x=-20, y=24, anchor="ne")
+        self.bind("<F1>", lambda e: self.open_help())
+        self._help = None
+
         self.show(0)
         self.bind("<FocusIn>", lambda e: e.widget is self and self.view and self.view.refresh())
+
+    def open_help(self):
+        if self._help is not None and self._help.winfo_exists():
+            self._help.lift()
+            self._help.focus_force()
+            return
+        self._help = HelpDialog(self)
 
     # -- utilidades -------------------------------------------------------- #
     def busy(self, on):
@@ -1143,15 +1404,13 @@ class App(ctk.CTk):
             w.destroy()
         for i, d in enumerate(self.data["games"]):
             sel = i == self.current
-            active = d.get("active")
-            b = ctk.CTkButton(self.game_list, text=d["name"] + (f"\n{active}" if active else ""),
-                              anchor="w", height=50, corner_radius=10, font=F(13, "bold" if sel else "normal"),
+            b = ctk.CTkButton(self.game_list, text=d["name"], anchor="w", height=42, corner_radius=10,
+                              font=F(13, "bold" if sel else "normal"),
                               fg_color=SELECTED if sel else "transparent", hover_color=HOVER,
                               text_color=TEXT, command=lambda i=i: self.show(i))
-            try:
-                b._text_label.configure(justify="left")
-            except AttributeError:
-                pass
+            tip(b, lambda d=d: f"{d['name']}\n"
+                               f"En uso: {d.get('active') or 'ninguna versión con nombre'}\n"
+                               f"Carpeta: {os.path.join(d['base'], d['active_name'])}")
             b.pack(fill="x", pady=2)
 
     def show(self, i):
@@ -1185,8 +1444,12 @@ class App(ctk.CTk):
                          text_color="white", font=F(14, "bold")).pack(side="left", padx=14, pady=10)
             ctk.CTkLabel(row, text=t, font=F(13), text_color=TEXT, justify="left",
                          anchor="w").pack(side="left", padx=(0, 16), fill="x")
-        ctk.CTkButton(box, text="＋  Añadir mi primer juego", height=44, font=F(14, "bold"),
-                      command=self.add_game).pack(pady=(22, 0))
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(pady=(22, 0))
+        tip(ctk.CTkButton(btns, text="＋  Añadir mi primer juego", height=44, font=F(14, "bold"),
+                          command=self.add_game), ADD_GAME_TIP).pack(side="left")
+        tip(ghost(btns, "¿Cómo funciona?", self.open_help, 140, TEXT),
+            "Abre la guía con la explicación completa.").pack(side="left", padx=(10, 0))
 
     # -- juegos ------------------------------------------------------------ #
     def ask_game(self, name="", path="", editing=False):
@@ -1303,8 +1566,20 @@ def self_test(report):
             assert not errors, "".join(errors[0])
             assert app.view.game.state()[0]["name"] == target
             assert app.view.recent == (target, previous), app.view.recent
-        app.destroy()
         lines.append("ok  animación del cambio (temas oscuro y claro)")
+
+        app.open_help()
+        app.update()
+        assert app._help is not None and app._help.winfo_exists()
+        app._help.destroy()
+        tooltip = app.view.add_btn._cc_tooltip
+        tooltip.show()
+        app.update()
+        assert tooltip.win is not None and tooltip.win.winfo_exists()
+        tooltip.hide()
+        assert not errors, "".join(errors[0])
+        app.destroy()
+        lines.append("ok  ayuda y tooltips")
         lines.append("RESULTADO: OK")
     except Exception:
         lines.append(traceback.format_exc())
